@@ -11,6 +11,10 @@
 #include "kernel/stat.h"
 #include "kernel/param.h"
 
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
 #ifndef static_assert
 #define static_assert(a, b) do { switch (0) case 0: case (a): ; } while (0)
 #endif
@@ -85,7 +89,7 @@ main(int argc, char *argv[])
   assert((BSIZE % sizeof(struct dinode)) == 0);
   assert((BSIZE % sizeof(struct dirent)) == 0);
 
-  fsfd = open(argv[1], O_RDWR|O_CREAT|O_TRUNC, 0666);
+  fsfd = open(argv[1], O_RDWR|O_CREAT|O_TRUNC|O_BINARY, 0666);
   if(fsfd < 0)
     die(argv[1]);
 
@@ -117,12 +121,12 @@ main(int argc, char *argv[])
   rootino = ialloc(T_DIR);
   assert(rootino == ROOTINO);
 
-  bzero(&de, sizeof(de));
+  memset(&de, 0, sizeof(de));
   de.inum = xshort(rootino);
   strcpy(de.name, ".");
   iappend(rootino, &de, sizeof(de));
 
-  bzero(&de, sizeof(de));
+  memset(&de, 0, sizeof(de));
   de.inum = xshort(rootino);
   strcpy(de.name, "..");
   iappend(rootino, &de, sizeof(de));
@@ -135,9 +139,9 @@ main(int argc, char *argv[])
     else
       shortname = argv[i];
     
-    assert(index(shortname, '/') == 0);
+    assert(strchr(shortname, '/') == 0);
 
-    if((fd = open(argv[i], 0)) < 0)
+    if((fd = open(argv[i], O_RDONLY|O_BINARY)) < 0)
       die(argv[i]);
 
     // Skip leading _ in name when writing to file system.
@@ -149,7 +153,7 @@ main(int argc, char *argv[])
 
     inum = ialloc(T_FILE);
 
-    bzero(&de, sizeof(de));
+    memset(&de, 0, sizeof(de));
     de.inum = xshort(inum);
     strncpy(de.name, shortname, DIRSIZ);
     iappend(rootino, &de, sizeof(de));
@@ -223,7 +227,7 @@ ialloc(ushort type)
   uint inum = freeinode++;
   struct dinode din;
 
-  bzero(&din, sizeof(din));
+  memset(&din, 0, sizeof(din));
   din.type = xshort(type);
   din.nlink = xshort(1);
   din.size = xint(0);
@@ -239,7 +243,7 @@ balloc(int used)
 
   printf("balloc: first %d blocks have been allocated\n", used);
   assert(used < BSIZE*8);
-  bzero(buf, BSIZE);
+  memset(buf, 0, BSIZE);
   for(i = 0; i < used; i++){
     buf[i/8] = buf[i/8] | (0x1 << (i%8));
   }
@@ -283,7 +287,7 @@ iappend(uint inum, void *xp, int n)
     }
     n1 = min(n, (fbn + 1) * BSIZE - off);
     rsect(x, buf);
-    bcopy(p, buf + off - (fbn * BSIZE), n1);
+    memmove(buf + off - (fbn * BSIZE), p, n1);
     wsect(x, buf);
     n -= n1;
     off += n1;
