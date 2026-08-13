@@ -76,9 +76,20 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  // Count only timer interrupts taken while this process runs in user mode.
+  // Save every user register before redirecting execution to the handler.
+  if(which_dev == 2){
+    if(p->alarm_interval > 0 && !p->alarm_active){
+      p->alarm_ticks++;
+      if(p->alarm_ticks >= p->alarm_interval){
+        p->alarm_ticks = 0;
+        p->alarm_active = 1;
+        p->alarm_frame = *p->trapframe;
+        p->trapframe->epc = p->alarm_handler;
+      }
+    }
     yield();
+  }
 
   usertrapret();
 }
@@ -217,4 +228,3 @@ devintr()
     return 0;
   }
 }
-

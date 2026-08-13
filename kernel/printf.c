@@ -132,3 +132,22 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+// Walk saved frame pointers within the current one-page kernel stack.
+void
+backtrace(void)
+{
+  uint64 fp = r_fp();
+  uint64 bottom = PGROUNDDOWN(fp);
+  uint64 top = bottom + PGSIZE;
+
+  printf("backtrace:\n");
+  while(fp >= bottom + 16 && fp < top){
+    uint64 ra = *(uint64 *)(fp - 8);
+    uint64 next = *(uint64 *)(fp - 16);
+    printf("%p\n", ra);
+    if(next <= fp || next >= top)
+      break;
+    fp = next;
+  }
+}
