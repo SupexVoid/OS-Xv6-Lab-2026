@@ -1,0 +1,28 @@
+1. Why does thread_switch need to save only callee-saved registers?
+
+thread_switch is called using the normal RISC-V calling convention. The C
+compiler already assumes that caller-saved registers such as a0-a7 and t0-t6
+may be destroyed by any function call and emits code to preserve live values
+when necessary. In contrast, a called function must preserve s0-s11 and sp, and
+the switch also needs ra as the suspended return path. A thread therefore stores
+ra, sp, and s0-s11; restoring them makes the eventual `ret` continue in the
+previously suspended call to thread_switch.
+
+2. Why might a uthread.c breakpoint fire before running uthread?
+
+All xv6 user programs are linked at the same low virtual addresses. A software
+breakpoint placed at the address associated with a uthread source line may be
+reached by the shell or another user program whose unrelated instruction is at
+the same virtual address before uthread is exec'ed.
+
+3. Why can two ph put threads lose keys?
+
+Suppose two keys hash to the same bucket. Threads A and B both read the old
+bucket head H. A allocates entry A and stores A.next = H; B allocates entry B
+and stores B.next = H. If A writes table[i] = A and then B writes table[i] = B,
+the only link to A is overwritten, so A's key is missing. One thread has no
+interleaving writer and cannot suffer this lost update.
+
+The implementation protects the entire search/update/insert operation with one
+mutex per bucket. It therefore reports zero missing keys, while operations on
+different buckets can proceed in parallel and provide a two-thread speedup.
