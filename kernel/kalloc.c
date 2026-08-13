@@ -18,15 +18,33 @@ struct run {
   struct run *next;
 };
 
-struct {
+static struct {
   struct spinlock lock;
   struct run *freelist;
 } kmem;
+
+#define NPHYPAGES ((PHYSTOP - KERNBASE) / PGSIZE)
+
+static struct {
+  struct spinlock lock;
+  int count[NPHYPAGES];
+} krefs;
+
+static int
+refindex(void *pa)
+{
+  uint64 address = (uint64)pa;
+
+  if(address < KERNBASE || address >= PHYSTOP || address % PGSIZE != 0)
+    panic("refindex");
+  return (address - KERNBASE) / PGSIZE;
+}
 
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&krefs.lock, "krefs");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,8 +53,12 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    acquire(&krefs.lock);
+    krefs.count[refindex(p)] = 1;
+    release(&krefs.lock);
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by v,
@@ -47,9 +69,20 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int refs;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  acquire(&krefs.lock);
+  refs = --krefs.count[refindex(pa)];
+  if(refs < 0)
+    panic("kfree refs");
+  release(&krefs.lock);
+
+  // Other page tables still refer to this physical page.
+  if(refs > 0)
+    return;
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -76,7 +109,39 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r){
+    acquire(&krefs.lock);
+    if(krefs.count[refindex(r)] != 0)
+      panic("kalloc refs");
+    krefs.count[refindex(r)] = 1;
+    release(&krefs.lock);
     memset((char*)r, 5, PGSIZE); // fill with junk
+  }
   return (void*)r;
+}
+
+// Add another page-table reference to an allocated physical page.
+void
+krefinc(void *pa)
+{
+  int index = refindex(pa);
+
+  acquire(&krefs.lock);
+  if(krefs.count[index] < 1)
+    panic("krefinc");
+  krefs.count[index]++;
+  release(&krefs.lock);
+}
+
+int
+krefcount(void *pa)
+{
+  int refs;
+
+  acquire(&krefs.lock);
+  refs = krefs.count[refindex(pa)];
+  if(refs < 1)
+    panic("krefcount");
+  release(&krefs.lock);
+  return refs;
 }
