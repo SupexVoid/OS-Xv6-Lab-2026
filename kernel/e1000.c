@@ -95,26 +95,95 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
-  //
-  // the mbuf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after sending.
-  //
-  
+  uint32 index;
+  struct tx_desc *desc;
+
+  acquire(&e1000_lock);
+
+  index = regs[E1000_TDT] % TX_RING_SIZE;
+  desc = &tx_ring[index];
+  if((desc->status & E1000_TXD_STAT_DD) == 0){
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // DD guarantees that DMA no longer reads the previous buffer.
+  if(tx_mbufs[index] != 0)
+    mbuffree(tx_mbufs[index]);
+
+  tx_mbufs[index] = m;
+  desc->addr = (uint64)m->head;
+  desc->length = m->len;
+  desc->cso = 0;
+  desc->cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  desc->status = 0;
+  desc->css = 0;
+  desc->special = 0;
+
+  // Publish the descriptor before telling the device that it is available.
+  __sync_synchronize();
+  regs[E1000_TDT] = (index + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver an mbuf for each packet (using net_rx()).
-  //
+  for(;;){
+    uint32 index;
+    uint16 length;
+    uint8 status, errors;
+    struct rx_desc *desc;
+    struct mbuf *packet, *replacement;
+
+    acquire(&e1000_lock);
+
+    index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+    desc = &rx_ring[index];
+    if((desc->status & E1000_RXD_STAT_DD) == 0){
+      release(&e1000_lock);
+      break;
+    }
+
+    packet = rx_mbufs[index];
+    length = desc->length;
+    status = desc->status;
+    errors = desc->errors;
+    replacement = mbufalloc(0);
+
+    if(replacement != 0){
+      rx_mbufs[index] = replacement;
+      desc->addr = (uint64)replacement->head;
+    } else {
+      // Under memory pressure, drop this packet and give the same empty
+      // buffer back to the device so the receive ring can keep moving.
+      packet->head = packet->buf;
+      packet->len = 0;
+      desc->addr = (uint64)packet->head;
+    }
+    desc->length = 0;
+    desc->csum = 0;
+    desc->status = 0;
+    desc->errors = 0;
+    desc->special = 0;
+
+    __sync_synchronize();
+    regs[E1000_RDT] = index;
+    release(&e1000_lock);
+
+    if(replacement == 0)
+      continue;
+
+    if(errors != 0 || (status & E1000_RXD_STAT_EOP) == 0 ||
+       length > MBUF_SIZE){
+      mbuffree(packet);
+      continue;
+    }
+    packet->len = length;
+    net_rx(packet);
+  }
 }
 
 void
