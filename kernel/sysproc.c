@@ -77,10 +77,46 @@ sys_sleep(void)
 
 
 #ifdef LAB_PGTBL
-int
+uint64
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 start;
+  uint64 user_mask;
+  int npages;
+  uint mask = 0;
+  pte_t *ptes[8 * sizeof(mask)];
+  struct proc *p = myproc();
+
+  if(argaddr(0, &start) < 0 ||
+     argint(1, &npages) < 0 ||
+     argaddr(2, &user_mask) < 0)
+    return -1;
+  if(npages < 0 || npages > 8 * sizeof(mask))
+    return -1;
+  if(npages > 0){
+    uint64 last = start + (uint64)(npages - 1) * PGSIZE;
+    if(start >= MAXVA || last < start || last >= MAXVA)
+      return -1;
+  }
+
+  // Validate the whole range before changing any PTEs, so an invalid request
+  // cannot partially consume access information.
+  for(int i = 0; i < npages; i++){
+    ptes[i] = walk(p->pagetable, start + (uint64)i * PGSIZE, 0);
+    if(ptes[i] == 0 || (*ptes[i] & (PTE_V | PTE_U)) != (PTE_V | PTE_U))
+      return -1;
+    if((*ptes[i] & PTE_A) != 0)
+      mask |= 1U << i;
+  }
+
+  if(copyout(p->pagetable, user_mask, (char *)&mask, sizeof(mask)) < 0)
+    return -1;
+
+  for(int i = 0; i < npages; i++)
+    *ptes[i] &= ~PTE_A;
+  if(npages > 0)
+    sfence_vma();
+
   return 0;
 }
 #endif

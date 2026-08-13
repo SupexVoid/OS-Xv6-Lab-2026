@@ -1,0 +1,29 @@
+1. Which other xv6 system call(s) could be made faster using this shared page?
+
+`uptime()` is the clearest candidate. The kernel could place the current tick
+count in a read-only user-mapped page and update it from the timer-interrupt
+path. User code could then read a consistent machine-word snapshot without an
+`ecall`. The same idea applies to other read-only, frequently queried process
+metadata, provided that the kernel remains the only writer.
+
+2. Explain the vmprint output and the low user pages.
+
+Sv39 uses three levels of 512-entry page tables. Each additional `..` in the
+output represents following a valid non-leaf PTE to the next level; leaf PTEs
+contain permission bits and the physical page number. Root index 0 leads to the
+low user address range. Page 0 contains init's executable code and data. Page 1
+is the guard page below the stack: its PTE is valid for kernel access but has
+PTE_U cleared, so user mode can neither read nor write it. Page 2 is init's user
+stack, including the initial argv data.
+
+Root index 255 leads to mappings near MAXVA. The third-to-last mapped page is
+USYSCALL; it contains the read-only `struct usyscall` with the process PID. The
+last two pages are the trapframe and trampoline.
+
+3. Why does copyin_new() need the `srcva + len < srcva` test?
+
+It detects unsigned 64-bit wraparound. For example, if `p->sz` is 0x4000,
+`srcva` is 0x1000, and `len` is 0xfffffffffffff800, then `srcva < p->sz` and
+the wrapped sum is 0x800, which also appears to be within `p->sz`. However,
+0x800 is less than the original 0x1000, so the third test detects the overflow
+and rejects the invalid range.
