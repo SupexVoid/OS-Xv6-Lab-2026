@@ -5,8 +5,8 @@ struct buf {
   uint blockno;
   struct sleeplock lock;
   uint refcnt;
+  uint64 lastuse; // logical time of the most recent final release
   struct buf *prev; // LRU cache list
   struct buf *next;
   uchar data[BSIZE];
 };
-

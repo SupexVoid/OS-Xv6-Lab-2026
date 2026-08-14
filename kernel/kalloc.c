@@ -21,12 +21,13 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmem[NCPU];
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for(int i = 0; i < NCPU; i++)
+    initlock(&kmem[i].lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -56,10 +57,40 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  push_off();
+  int id = cpuid();
+  acquire(&kmem[id].lock);
+  r->next = kmem[id].freelist;
+  kmem[id].freelist = r;
+  release(&kmem[id].lock);
+  pop_off();
+}
+
+// Detach a bounded batch of another CPU's pages. Only one free-list lock is
+// held at a time, so two empty CPUs cannot deadlock while stealing.
+static struct run*
+stealpages(int id, struct run **last)
+{
+  for(int step = 1; step < NCPU; step++){
+    int donor = (id + step) % NCPU;
+    acquire(&kmem[donor].lock);
+
+    struct run *head = kmem[donor].freelist;
+    if(head != 0){
+      struct run *p = head;
+      for(int i = 1; i < 1024 && p->next != 0; i++)
+        p = p->next;
+
+      kmem[donor].freelist = p->next;
+      p->next = 0;
+      release(&kmem[donor].lock);
+      *last = p;
+      return head;
+    }
+
+    release(&kmem[donor].lock);
+  }
+  return 0;
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -68,13 +99,27 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
-  struct run *r;
+  struct run *r, *last;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
+  push_off();
+  int id = cpuid();
+  acquire(&kmem[id].lock);
+  r = kmem[id].freelist;
   if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+    kmem[id].freelist = r->next;
+  release(&kmem[id].lock);
+
+  if(r == 0){
+    struct run *batch = stealpages(id, &last);
+    if(batch != 0){
+      acquire(&kmem[id].lock);
+      last->next = kmem[id].freelist;
+      kmem[id].freelist = batch->next;
+      release(&kmem[id].lock);
+      r = batch;
+    }
+  }
+  pop_off();
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
