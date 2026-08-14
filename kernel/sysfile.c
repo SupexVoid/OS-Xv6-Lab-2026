@@ -252,7 +252,9 @@ create(char *path, short type, short major, short minor)
   if((ip = dirlookup(dp, name, 0)) != 0){
     iunlockput(dp);
     ilock(ip);
-    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
+    if(type == T_FILE &&
+       (ip->type == T_FILE || ip->type == T_DEVICE ||
+        ip->type == T_SYMLINK))
       return ip;
     iunlockput(ip);
     return 0;
@@ -283,6 +285,36 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+// Follow a chain of symbolic links. The caller passes a locked inode; on
+// success the returned non-link inode is locked. All references are released
+// on failure. A fixed depth limit also detects cycles without extra storage.
+static struct inode*
+follow_symlinks(struct inode *ip)
+{
+  char target[MAXPATH];
+
+  for(int depth = 0; ip->type == T_SYMLINK; depth++){
+    if(depth == 10 || ip->size == 0 || ip->size > MAXPATH){
+      iunlockput(ip);
+      return 0;
+    }
+
+    uint size = ip->size;
+    if(readi(ip, 0, (uint64)target, 0, size) != size ||
+       target[size - 1] != 0){
+      iunlockput(ip);
+      return 0;
+    }
+
+    iunlockput(ip);
+    if((ip = namei(target)) == 0)
+      return 0;
+    ilock(ip);
+  }
+
+  return ip;
+}
+
 uint64
 sys_open(void)
 {
@@ -309,11 +341,19 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
-      iunlockput(ip);
+  }
+
+  if(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0){
+    if((ip = follow_symlinks(ip)) == 0){
       end_op();
       return -1;
     }
+  }
+
+  if(ip->type == T_DIR && (omode & (O_WRONLY | O_RDWR)) != 0){
+    iunlockput(ip);
+    end_op();
+    return -1;
   }
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
@@ -349,6 +389,36 @@ sys_open(void)
   end_op();
 
   return fd;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int n;
+
+  if((n = argstr(0, target, MAXPATH)) < 0 ||
+     argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  // Include the terminator so opening a corrupt/incomplete link cannot make
+  // pathname lookup read uninitialized kernel-stack bytes.
+  if(writei(ip, 0, (uint64)target, 0, n + 1) != n + 1){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+  return 0;
 }
 
 uint64
