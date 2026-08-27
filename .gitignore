@@ -2,4 +2,4 @@ tmp/
 *.out
 *.log
 .vscode/
-
+/output/
