@@ -11,11 +11,11 @@
 ## 实验环境
 
 - 代码基线：MIT 6.S081 2021 `thread` 分支；
-- xv6 部分：RISC-V 64 位交叉编译后在 QEMU 9.2.4 中运行；
-- pthread 部分：Windows 11、MinGW-w64 POSIX threads；
-- 正式答辩环境计划：WSL 2 + Ubuntu，pthread 源码可直接编译。
+- 主机系统：Windows 11，Linux 环境为 WSL2 + Ubuntu 22.04 LTS；
+- xv6 部分：RISC-V 64 位交叉编译后在 QEMU 中运行；
+- pthread 部分：Ubuntu GCC 与 POSIX threads，使用 `-pthread` 编译和链接。
 
-宿主程序把 POSIX 扩展 `random/srandom` 改为标准 C `rand/srand`，线程编号使用 `intptr_t` 在整数和 `void *` 之间转换，以同时适应 Linux LP64 和 Windows LLP64 数据模型，不改变并发算法。
+所有 xv6 和 pthread 程序均在 Ubuntu 终端中编译、运行和测试。宿主程序使用标准 C `rand/srand`，线程编号使用 `intptr_t` 在整数和 `void *` 之间转换，避免依赖实现相关的整数宽度。
 
 ## 用户态线程结构
 
@@ -52,7 +52,7 @@ thread_switch(&old->context, &new->context);
 2. 更新已有 entry，或分配并链接新 entry；
 3. 解锁。
 
-锁必须在查找前获取。如果像学长版本那样先无锁查找、再在插入前加锁，两个相同 key 仍可能同时被判断为不存在，也不能保证整个判断—修改序列原子化。
+锁必须在查找前获取。如果先无锁查找、再在插入前加锁，两个相同 key 仍可能同时被判断为不存在，也不能保证整个判断—修改序列原子化。
 
 不同 bucket 使用不同锁，因此散列到不同 bucket 的 `put()` 能并行执行。所有 put 线程 join 后才启动只读 get 线程，join 建立同步关系，get 阶段无需继续获取 bucket 锁。
 
@@ -71,26 +71,26 @@ barrier 状态包括：
 
 必须使用 `while` 而不是单次 `if`：condition variable 允许虚假唤醒；同时最快的线程可能很快进入下一轮，等待条件必须以 generation 是否改变为准。`pthread_cond_wait` 在睡眠时原子释放 mutex，醒来后重新获得，从而不会错过最后到达者的状态更新。
 
-## 与学长实现的核对
+## 实现检查与边界处理
 
-学长仓库用于确认实验流程，本实现加强了：
+实现过程中重点检查并处理了以下细节：
 
 1. 新线程栈显式按 16 字节对齐，且复用槽位时清零旧上下文；
 2. 无空闲线程槽时避免数组越界；
 3. ph 的锁覆盖查找与修改整个原子操作，而不是查找后才加锁；
 4. barrier 使用轮次条件的 `while` 循环，处理虚假唤醒与跨轮竞速；
 5. 正确销毁 mutex/condition variable 并释放宿主线程数组；
-6. 使用 `intptr_t` 避免 Windows 64 位指针被 32 位 long 截断。
+6. 使用 `intptr_t` 避免通过 `long` 转换时产生实现相关的宽度问题。
 
 ## 遇到的问题与解决方法
 
-### 1. Windows pthread 源码的类型与随机数接口
+### 1. 线程参数的可移植类型转换
 
-MinGW 环境没有 `random/srandom`，Windows 64 位 ABI 中 `long` 仍是 32 位。原代码把线程编号经 long 转为指针会产生尺寸警告，也不是通用写法。改用 C 标准 `rand/srand` 和 `<stdint.h>` 中保证能容纳指针的 `intptr_t` 后，Linux 与 Windows 都可编译。
+把线程编号先转换为 `long` 再转换为指针会依赖具体 ABI，容易产生尺寸警告。改用 `<stdint.h>` 中保证能容纳指针的 `intptr_t`，并使用标准 C `rand/srand`，使参数传递和随机数接口更加明确。
 
-### 2. 官方评分正则与 CRLF
+### 2. Barrier 的跨轮次竞态
 
-宿主二进制实际输出正确，但第一次 Windows 评分中 ph 和 barrier 被统计为没有匹配项。捕获原始字节后发现 C 运行库使用 `\r\n`，MIT 脚本的正则以 `$` 严格匹配 Linux LF。未提交的 Windows 评分副本只把捕获文本中的 CRLF 规范化为 LF，再使用原始正则和性能门槛，最终得到 60/60。在 WSL/Linux 中无需这一兼容层。
+如果等待线程只检查一次条件，虚假唤醒或最快线程提前进入下一轮都可能让上一轮线程错误越过屏障。解决方法是记录进入时的 `round`，并在 `while` 循环中等待轮次真正变化；最后到达者重置计数、增加轮次并广播唤醒。
 
 ### 3. 正确性与并行度的权衡
 
@@ -141,6 +141,6 @@ time: OK
 Score: 60/60
 ```
 
-## 心得与答辩准备
+## 实验心得
 
-上下文切换保存的是“让一段执行未来能继续”的最小机器状态；mutex 保护的是跨多条语句的数据不变量；condition variable 则把“等待某个状态变化”与锁结合起来。答辩时应能解释 `ret` 如何启动新线程、caller/callee-saved 的区别、lost update 的具体交错、为什么每 bucket 锁兼顾正确与性能，以及 barrier 为什么必须记录 round 并在循环中等待。
+上下文切换保存的是“让一段执行未来能继续”的最小机器状态；mutex 保护的是跨多条语句的数据不变量；condition variable 则把“等待某个状态变化”与锁结合起来。每 bucket 锁和带 generation 的 barrier 进一步说明，同步方案既要保证正确性，也要兼顾锁粒度、并行度和跨轮次状态一致性。
